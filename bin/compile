@@ -139,10 +139,6 @@ NGINX_URL="$NGINX_VENDOR_URL/package/nginx-$NGINX_VERSION.tgz"
 
 curl --fail --retry 3 --retry-delay 2 --connect-timeout 3 --max-time 30 -s "$NGINX_URL" | tar -C "$BUILD_DIR/vendor/nginx" -xzf -
 
-if [ -n "$KIBANA_USER" -a -n "$KIBANA_PASSWORD" ] ; then
-  printf "$KIBANA_USER:$(openssl passwd -1 -salt $(openssl rand -base64 6) $KIBANA_PASSWORD)" > $BUILD_DIR/.kibana-password
-fi
-
 mv "${KIBANA_DIR}/bin/kibana" "${KIBANA_DIR}/bin/kibana.orig"
 cp "$basedir/../conf/nginx.conf.erb" "$BUILD_DIR/vendor/nginx/conf/nginx.conf.erb"
 
@@ -163,6 +159,10 @@ eval \$(echo \$ELASTICSEARCH_URL | sed -r 's/(https?:\/\/)((.*):(.*)@){0,1}(.*)/
 
 if [[ -n "\$ELASTICSEARCH_USER" && -n "\$ELASTICSEARCH_PASSWORD" ]] ; then
   export ELASTICSEARCH_AUTH=\$(echo -n \$ELASTICSEARCH_USER:\$ELASTICSEARCH_PASSWORD | base64 --wrap=0)
+fi
+
+if [ -n "\$KIBANA_USER" -a -n "\$KIBANA_PASSWORD" ] ; then
+  printf "\$KIBANA_USER:\$(openssl passwd -1 -salt \$(openssl rand -base64 6) \$KIBANA_PASSWORD)" > \$basedir/.kibana-password
 fi
 
 erb "\$basedir/vendor/nginx/conf/nginx.conf.erb" > "\$basedir/vendor/nginx/conf/nginx.conf"
