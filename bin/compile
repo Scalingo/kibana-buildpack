@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # usage: bin/compile <build_dir> <cache_dir> <env_dir>
 
+# TODO:
+#   [ ] Parse ELASTICSEARCH_URL somewhere, and build env var present in kibana.yml
+#   [ ] Handle more env var in kibana.yml (support for brought-in CA.crt file)
+#   [ ] Backport support for ES_SSL_VERIFICATION_MODE
+#   [ ] FIXMEs
+#   [ ] Tests
+#
+
 cmnlib="$( readlink -f "$( dirname "${0}" )/../vendor/cmnlib.sh" )"
 # shellcheck source=vendor/cmnlib.sh
 source "${cmnlib}"
@@ -120,10 +128,22 @@ cmn::task::start "Setting up configuration file"
 # Environment variable can be injected into Kibana's config file using
 # the regular ${MY_ENV_VAR} syntax.
 # Default value can be provided using ${MY_ENV_VAR:default_value}.
-cp "${buildpack_dir:?}/vendor/kibana.yml" "${kibana_dir}/config/kibana.yml"
+
+if [[ -f "${build_dir:?}/kibana.yml" ]]; then
+	# Use the user-provided file, if any:
+	cp "${build_dir:?}/kibana.yml" \
+		"${kibana_dir}/config/kibana.yml" \
+		2>/dev/null
+else
+	# Use the default one:
+	cp "${buildpack_dir:?}/vendor/kibana.yml" \
+		"${kibana_dir}/config/kibana.yml" \
+		2>/dev/null
+fi
 cmn::task::finish
 
 # -----------------------------------------------------------------------------
+#FIXME: is this section useful? Currently there's no profile.d script.
 
 cmn::step::start "Building Environment"
 
@@ -185,6 +205,9 @@ if [[ -f "${build_dir:?}/plugins-config" ]]; then
 	done < "${build_dir:?}/plugins-config"
 fi
 
+# -----------------------------------------------------------------------------
+
+cmn::main::finish
 
 
 indent() {
