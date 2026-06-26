@@ -1,0 +1,12 @@
+# Kibana Server ---------------------------------------------------------------
+server.host: ${KIBANA_HOST:0.0.0.0}
+server.port: ${KIBANA_PORT:5601}
+
+# Elasticsearch Database ------------------------------------------------------
+elasticsearch.hosts: ${ELASTICSEARCH_DB_HOST:http://localhost:9200}
+elasticsearch.username: ${ELASTICSEARCH_DB_USERNAME:kibana_system}
+elasticsearch.password: $${ELASTICSEARCH_DB_PASSWORD:pass}
+elasticsearch.ssl.verificationMode: ${ELASTICSEARCH_DB_SSL_VERIFICATION_MODE:-full}
+
+# Log -------------------------------------------------------------------------
+logging.root.level: ${KIBANA_LOG_LEVEL:debug}

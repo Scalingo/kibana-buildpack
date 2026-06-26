@@ -1,4 +1,191 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# usage: bin/compile <build_dir> <cache_dir> <env_dir>
+
+cmnlib="$( readlink -f "$( dirname "${0}" )/../vendor/cmnlib.sh" )"
+# shellcheck source=vendor/cmnlib.sh
+source "${cmnlib}"
+
+
+cmn::main::start "${0}" "${1}" "${2}" "${3}"
+
+# -----------------------------------------------------------------------------
+
+# shellcheck source=VERSIONS
+source "${buildpack_dir:?}/VERSIONS"
+version="${KIBANA_VERSION:-"${KIBANA_DEFAULT_VERSION}"}"
+
+archive="kibana-oss-${version}-linux-x86_64.tar.gz"
+
+archive_url="https://artifacts.elastic.co/downloads/kibana/${archive}"
+hash_url="${archive_url}.sha512"
+
+cache_file="${cache_dir:?}/${archive}"
+hash_file="${tmp_dir:?}/${archive}.sha512"
+
+kibana_dir="${build_dir:?}/kibana"
+
+# -----------------------------------------------------------------------------
+
+cmn::step::start "Installing Kibana"
+
+# We always check archive validity using a freshly downloaded checksum to
+# detect/prevent immutability issues (i.e. cases where upstream replaces the
+# archive at the same URL/same version number)
+# So let's download the checksum:
+cmn::task::start "Downloading checksum"
+if ! cmn::file::download "${hash_url}" "${hash_file}"; then
+	cmn::main::fail "${?}" <<-EOM
+		Unable to download checksum file.
+		Aborting.
+	EOM
+fi
+cmn::task::finish
+
+if [[ ! -f "${cache_file}" ]]; then
+	# The archive doesn't exist in the cache.
+
+	# Remove any existing cached archive, as they are probably for another
+	# version:
+	cmn::task::start "Cleaning cache"
+	rm --recursive --force "${cache_dir:?}"/kibana*.tar.gz
+	cmn::task::finish
+
+	# Download appropriate version:
+	cmn::task::start "Downloading archive"
+	if ! cmn::file::download "${archive_url}" "${cache_file}"; then
+		cmn::main::fail "${?}" <<-EOM
+			Unable to download Kibana archive.
+			Aborting.
+		EOM
+	fi
+	cmn::task::finish
+else
+	# The archive is in cache.
+
+	cmn::output::info "Found matching file in cache."
+fi
+
+# From this point, we have an archive in cache.
+
+# We always check the archive validity to prevent cache corruption and other
+# issues.
+cmn::task::start "Checking archive validity"
+if ! cmn::file::validate_checksum "${cache_file}" "${hash_file}"; then
+	# File in cache does not seem valid,
+	# remove it so a future run can be successful
+	rm --force "${cache_file}"
+
+	cmn::main::fail 2 <<-EOM
+		The checksum for the archive file in the cache doesn't match what's
+		expected.
+
+		Here are the most common causes:
+
+		- The archive file in the cache is corrupt. This can unfortunately
+		  happen, but has no strong consequences. Triggering a new deployment
+		  should fix the issue.
+
+		- A networking issue occurred, causing the downloaded checksum file to
+		  be incomplete or corrupt. Triggering a new deployment should force
+		  the platform to download the archive and the checksum again, and the
+		  deployment should pass.
+
+		- Upstream replaced the archive and its checksum, resulting in the
+		  same version number having a different checksum. This could mean a
+		  malicious threat tampered the source archive and its checksum.
+		  Please check upstream for a potential explanation and make sure it's
+		  still trustable.
+
+		In all cases, the cached archive has been removed to force a new
+		download during the next deployment attempt.
+
+		Aborting.
+	EOM
+fi
+cmn::task::finish
+
+# From this point we have a valid file in cache.
+
+cmn::task::start "Extracting"
+mkdir --parents "${kibana_dir}"
+tar --extract --file="${cache_file}" --directory="${kibana_dir}" \
+	--strip-components=1
+cmn::task::finish
+
+# -----------------------------------------------------------------------------
+
+cmn::step::start "Configuring"
+
+cmn::task::start "Setting up configuration file"
+# Environment variable can be injected into Kibana's config file using
+# the regular ${MY_ENV_VAR} syntax.
+# Default value can be provided using ${MY_ENV_VAR:default_value}.
+cp "${buildpack_dir:?}/vendor/kibana.yml" "${kibana_dir}/config/kibana.yml"
+cmn::task::finish
+
+# -----------------------------------------------------------------------------
+
+cmn::step::start "Building Environment"
+
+mkdir --parents "${build_dir:?}/.profile.d"
+
+cmn::task::start "Setting up environment"
+cp "${buildpack_dir:?}/vendor/profile.d/050-logstash.sh" \
+	"${build_dir:?}/.profile.d/"
+cmn::task::finish
+
+cmn::task::start "Loading environment"
+source "${build_dir:?}/.profile.d/050-logstash.sh"
+cmn::task::finish
+
+# -----------------------------------------------------------------------------
+
+cmn::step::start "Installing plugins"
+
+cmn::task::start "Removing plugin x-pack"
+if ! kibana-plugin remove "x-pack" > "${build_log}" 2>&1; then
+	err="${?}"
+	cmn::task::fail
+	cmn::output::err < "${build_log}"
+	cmn::main::fail "${err}" <<-EOM
+		Unable to remove x-pack plugin.
+		Aborting.
+	EOM
+fi
+cmn::task::finish
+
+if [[ -f "${build_dir:?}/kibana-plugins" ]]; then
+	cmn::output::info "Detected kibana-plugins file"
+
+	while IFS= read -r plugin; do
+		cmn::task::start "Installing plugin ${plugin}"
+		if ! kibana-plugin install "${plugin}" > "${build_log}" 2>&1; then
+			err="${?}"
+			cmn::task::fail
+			cmn::output::err < "${build_log}"
+			cmn::main::fail "${err}" <<-EOM
+				Unable to install plugin ${plugin}.
+				Aborting.
+			EOM
+		fi
+		cmn::task::finish
+	done < "${build_dir:?}/kibana-plugins"
+fi
+
+if [[ -f "${build_dir:?}/plugins-config" ]]; then
+	cmn::output::info "Detected plugins-config file"
+
+	while IFS= read -r config_line; do
+		# Split $config_line in $local_file + $remote_file:
+		IFS=: read -r local_file remote_file <<< "${config_line}"
+
+		cmn::task::start "Copying ${local_file} to ${remote_file}"
+		cp "${local_file}" "${kibana_dir}/plugins/${remote_file}" 2>/dev/null
+		cmn::task::finish
+	done < "${build_dir:?}/plugins-config"
+fi
+
+
 
 indent() {
   sed -u 's/^/       /'
@@ -50,12 +237,16 @@ case ${KIBANA_PACKAGE} in
 esac
 
 
-eval $(echo $ELASTICSEARCH_URL | sed -r 's/(https?:\/\/)((.*):(.*)@){0,1}(.*)/ELASTICSEARCH_URL=\1\5 \nELASTICSEARCH_USER=\3 \nELASTICSEARCH_PASSWORD=\4/')
+eval $( \
+	echo $ELASTICSEARCH_URL \
+	| sed -r 's/(https?:\/\/)((.*):(.*)@){0,1}(.*)/ELASTICSEARCH_URL=\1\5 \nELASTICSEARCH_USER=\3 \nELASTICSEARCH_PASSWORD=\4/'
+)
 
 mkdir="mkdir -p"
 download="curl -sLO"
 extract="$tar -C $BUILD_DIR --wildcards -f"
 verify="sha512sum --check --warn -"
+
 configure_url='sed -i -r s/\#(elasticsearch.hosts:\x20).{1,}/\1["'$(echo $ELASTICSEARCH_URL | sed 's/\//\\\//g')'"]/'
 configure_host='sed -i -r s/\#(server.host:\x20).{1,}/\1"0.0.0.0"/'
 configure_user='sed -i -r s/\#(elasticsearch.username:\x20).{1,}/\1"'$ELASTICSEARCH_USER'"/'
