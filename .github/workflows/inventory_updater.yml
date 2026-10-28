@@ -1,0 +1,27 @@
+---
+name: Update buildpack inventory
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Everyday at 9am:
+    - cron: "0 9 * * *"
+
+jobs:
+  update-inventory:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Update inventory
+        uses: Scalingo/actions/update-buildpack-inventory@main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          repository: elastic/kibana
+          download_url: https://artifacts.elastic.co/downloads/kibana/kibana-{version}-linux-x86_64.tar.gz
+          version_series: "9"
+          releases_limit: 5
+          pr_assignees: "${{ vars.AUTO_ASSIGNEES }}"
+          pr_reviewers: "${{ vars.AUTO_REVIEWERS }}"
