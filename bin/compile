@@ -180,17 +180,6 @@ cmn::task::finish
 
 cmn::step::start "Installing plugins"
 
-cmn::task::start "Removing plugin x-pack"
-if ! kibana-plugin remove "x-pack" > "${build_log}" 2>&1; then
-	cmn::task::fail
-	cmn::output::err < "${build_log}"
-	cmn::main::fail 10 <<-EOM
-		Unable to remove x-pack plugin.
-		Aborting.
-	EOM
-fi
-cmn::task::finish
-
 if [[ -f "${build_dir:?}/kibana-plugins" ]]; then
 	cmn::output::info "Detected kibana-plugins file"
 
