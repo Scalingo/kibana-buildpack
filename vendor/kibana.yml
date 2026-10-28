@@ -1,14 +1,23 @@
 # Kibana Server ---------------------------------------------------------------
-server.host: ${KIBANA_HOST:0.0.0.0}
-server.port: ${PORT:5601}
-server.name: ${KIBANA_NAME:my-kibana}
+server:
+  host: ${KIBANA_HOST:0.0.0.0}
+  port: ${PORT:5601}
+  name: ${CONTAINER:my-kibana}
 
 # Elasticsearch Database ------------------------------------------------------
-elasticsearch.hosts:
-  - ${ELASTICSEARCH_DB_HOST:http://localhost:9200}
-elasticsearch.username: ${ELASTICSEARCH_DB_USERNAME:kibana_system}
-elasticsearch.password: $${ELASTICSEARCH_DB_PASSWORD:pass}
-elasticsearch.ssl.verificationMode: ${ELASTICSEARCH_DB_SSL_VERIFICATION_MODE:-full}
+elasticsearch:
+  hosts:
+    - ${ELASTICSEARCH_HOST:http://localhost:9200}
+  username: ${ELASTICSEARCH_USERNAME:kibana_system}
+  password: ${ELASTICSEARCH_PASSWORD:pass}
+  ssl:
+    verificationMode: ${ELASTICSEARCH_SSL_VERIFICATIONMODE:full}
+    # Optional PEM CA file path. Unset or empty uses the default trusted CAs.
+    certificateAuthorities: ${ELASTICSEARCH_SSL_CERTIFICATEAUTHORITIES:}
 
 # Log -------------------------------------------------------------------------
-logging.root.level: ${KIBANA_LOG_LEVEL:debug}
+logging:
+  root:
+    level: ${KIBANA_LOG_LEVEL:debug}
+
+# End of Scalingo provided configuration --------------------------------------

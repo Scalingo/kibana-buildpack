@@ -1,53 +1,79 @@
 #!/usr/bin/env bash
 # usage: bin/compile <build_dir> <cache_dir> <env_dir>
 
-# TODO:
-#   [ ] Parse ELASTICSEARCH_URL somewhere, and build env var present in kibana.yml
-#   [ ] Handle more env var in kibana.yml (support for brought-in CA.crt file)
-#   [ ] Backport support for ES_SSL_VERIFICATION_MODE
-#   [ ] FIXMEs
-#   [ ] Tests
-#
 
 cmnlib="$( readlink -f "$( dirname "${0}" )/../vendor/cmnlib.sh" )"
 # shellcheck source=vendor/cmnlib.sh
 source "${cmnlib}"
 
-
 cmn::main::start "${0}" "${1}" "${2}" "${3}"
 
 # -----------------------------------------------------------------------------
 
-# shellcheck source=VERSIONS
-source "${buildpack_dir:?}/VERSIONS"
-version="${KIBANA_VERSION:-"${KIBANA_DEFAULT_VERSION}"}"
+# Inventory file:
+inventory="${buildpack_dir:?}/INVENTORY.tsv"
 
-archive="kibana-oss-${version}-linux-x86_64.tar.gz"
+# This statement won't fail even if cmn::inventory::get_default were to fail.
+version="${KIBANA_VERSION:-$( cmn::inventory::get_default "${inventory}" )}"
 
-archive_url="https://artifacts.elastic.co/downloads/kibana/${archive}"
-hash_url="${archive_url}.sha512"
+if [[ -z "${version}" ]]; then
+	cmn::main::fail 1 <<- EOM
+		Unable to determine which version of Kibana to deploy.
+		It seems like there's no default version in the inventory file either,
+		which isn't OK.
 
-cache_file="${cache_dir:?}/${archive}"
-hash_file="${tmp_dir:?}/${archive}.sha512"
+		Please:
+		1. Set KIBANA_VERSION environment variable to the desired value, and
+		   try to redeploy. It should pass.
+		2. Either reach out to our Support Team to let them know about this
+		   situation, or file an issue in the kibana-buildpack repository
+		   (https://github.com/Scalingo/kibana-buildpack/issues).
+		Thanks <3
 
+		Aborting for now.
+	EOM
+fi
+
+if ! archive_url="$( cmn::inventory::get_url "${inventory}" "${version}" )"
+then
+	cmn::main::fail 1 <<- EOM
+		Unable to retrieve download URL for version ${version}".
+		It seems like there's an issue with the buildpack inventory file.
+
+		Please either reach out to our Support Team to let them know about this
+		situation, or file an issue in the kibana-buildpack repository
+		(https://github.com/Scalingo/kibana-buildpack/issues)
+		Thanks <3
+
+		Aborting for now.
+	EOM
+fi
+
+if ! archive_checksum="$( cmn::inventory::get_checksum "${inventory}" "${version}" )"
+then
+	cmn::main::fail 1 <<- EOM
+		Unable to retrieve checksum for version ${version}".
+		It seems like there's an issue with the buildpack inventory file.
+
+		Please either reach out to our Support Team to let them know about this
+		situation, or file an issue in the kibana-buildpack repository
+		(https://github.com/Scalingo/kibana-buildpack/issues)
+		Thanks <3
+
+		Aborting for now.
+	EOM
+fi
+
+cache_file="${cache_dir:?}/kibana-${version}.tar.gz"
 kibana_dir="${build_dir:?}/kibana"
+kibana_config_file="${kibana_dir}/config/kibana.yml"
+build_log="${tmp_dir:?}/build.log"
+
+cmn::output::info "Deploying Kibana ${version}"
 
 # -----------------------------------------------------------------------------
 
 cmn::step::start "Installing Kibana"
-
-# We always check archive validity using a freshly downloaded checksum to
-# detect/prevent immutability issues (i.e. cases where upstream replaces the
-# archive at the same URL/same version number)
-# So let's download the checksum:
-cmn::task::start "Downloading checksum"
-if ! cmn::file::download "${hash_url}" "${hash_file}"; then
-	cmn::main::fail "${?}" <<-EOM
-		Unable to download checksum file.
-		Aborting.
-	EOM
-fi
-cmn::task::finish
 
 if [[ ! -f "${cache_file}" ]]; then
 	# The archive doesn't exist in the cache.
@@ -61,7 +87,7 @@ if [[ ! -f "${cache_file}" ]]; then
 	# Download appropriate version:
 	cmn::task::start "Downloading archive"
 	if ! cmn::file::download "${archive_url}" "${cache_file}"; then
-		cmn::main::fail "${?}" <<-EOM
+		cmn::main::fail 2 <<-EOM
 			Unable to download Kibana archive.
 			Aborting.
 		EOM
@@ -78,20 +104,16 @@ fi
 # We always check the archive validity to prevent cache corruption and other
 # issues.
 cmn::task::start "Checking archive validity"
-if ! cmn::file::validate_checksum "${cache_file}" "${hash_file}"; then
+if ! cmn::file::validate_checksum "${cache_file}" "${archive_checksum}"; then
 	# File in cache does not seem valid,
 	# remove it so a future run can be successful
-	rm --force "${cache_file}"
+	rm --force -- "${cache_file}"
 
 	cmn::main::fail 2 <<-EOM
 		The checksum for the archive file in the cache doesn't match what's
 		expected.
 
 		Here are the most common causes:
-
-		- The archive file in the cache is corrupt. This can unfortunately
-		  happen, but has no strong consequences. Triggering a new deployment
-		  should fix the issue.
 
 		- A networking issue occurred, causing the downloaded checksum file to
 		  be incomplete or corrupt. Triggering a new deployment should force
@@ -131,31 +153,27 @@ cmn::task::start "Setting up configuration file"
 
 if [[ -f "${build_dir:?}/kibana.yml" ]]; then
 	# Use the user-provided file, if any:
-	cp "${build_dir:?}/kibana.yml" \
-		"${kibana_dir}/config/kibana.yml" \
+	cp -- "${build_dir:?}/kibana.yml" "${kibana_config_file}" \
 		2>/dev/null
 else
 	# Use the default one:
-	cp "${buildpack_dir:?}/vendor/kibana.yml" \
-		"${kibana_dir}/config/kibana.yml" \
+	cp -- "${buildpack_dir:?}/vendor/kibana.yml" "${kibana_config_file}" \
 		2>/dev/null
 fi
 cmn::task::finish
 
 # -----------------------------------------------------------------------------
-#FIXME: is this section useful? Currently there's no profile.d script.
 
 cmn::step::start "Building Environment"
 
 mkdir --parents "${build_dir:?}/.profile.d"
 
 cmn::task::start "Setting up environment"
-cp "${buildpack_dir:?}/vendor/profile.d/050-logstash.sh" \
+cp -- "${buildpack_dir:?}/vendor/profile.d/060-kibana.sh" \
 	"${build_dir:?}/.profile.d/"
-cmn::task::finish
 
-cmn::task::start "Loading environment"
-source "${build_dir:?}/.profile.d/050-logstash.sh"
+PATH="${PATH:+${PATH}:}${kibana_dir}/bin"
+export PATH
 cmn::task::finish
 
 # -----------------------------------------------------------------------------
@@ -164,10 +182,9 @@ cmn::step::start "Installing plugins"
 
 cmn::task::start "Removing plugin x-pack"
 if ! kibana-plugin remove "x-pack" > "${build_log}" 2>&1; then
-	err="${?}"
 	cmn::task::fail
 	cmn::output::err < "${build_log}"
-	cmn::main::fail "${err}" <<-EOM
+	cmn::main::fail 10 <<-EOM
 		Unable to remove x-pack plugin.
 		Aborting.
 	EOM
@@ -180,10 +197,9 @@ if [[ -f "${build_dir:?}/kibana-plugins" ]]; then
 	while IFS= read -r plugin; do
 		cmn::task::start "Installing plugin ${plugin}"
 		if ! kibana-plugin install "${plugin}" > "${build_log}" 2>&1; then
-			err="${?}"
 			cmn::task::fail
 			cmn::output::err < "${build_log}"
-			cmn::main::fail "${err}" <<-EOM
+			cmn::main::fail 11 <<-EOM
 				Unable to install plugin ${plugin}.
 				Aborting.
 			EOM
@@ -192,224 +208,14 @@ if [[ -f "${build_dir:?}/kibana-plugins" ]]; then
 	done < "${build_dir:?}/kibana-plugins"
 fi
 
-if [[ -f "${build_dir:?}/plugins-config" ]]; then
-	cmn::output::info "Detected plugins-config file"
+if [[ -f "${build_dir:?}/kibana-plugins.yml" ]]; then
+	cmn::output::info "Detected kibana-plugins.yml file"
+	cmn::task::start "Appending plugins configuration"
 
-	while IFS= read -r config_line; do
-		# Split $config_line in $local_file + $remote_file:
-		IFS=: read -r local_file remote_file <<< "${config_line}"
-
-		cmn::task::start "Copying ${local_file} to ${remote_file}"
-		cp "${local_file}" "${kibana_dir}/plugins/${remote_file}" 2>/dev/null
-		cmn::task::finish
-	done < "${build_dir:?}/plugins-config"
+	printf '\n' >> "${kibana_config_file}"
+	cat -- "${build_dir:?}/kibana-plugins.yml" >> "${kibana_config_file}"
 fi
 
 # -----------------------------------------------------------------------------
 
 cmn::main::finish
-
-
-indent() {
-  sed -u 's/^/       /'
-}
-
-if [ -n "$BUILDPACK_DEBUG" ]; then
-    set -x
-fi
-
-BUILD_DIR=$1
-CACHE_DIR=$2
-ENV_DIR=$3
-basedir="$( cd -P "$( dirname "$0" )" && pwd )"
-STACK="${STACK:-scalingo-20}"
-
-cd $BUILD_DIR
-
-INIT_SCRIPT="$BUILD_DIR/.profile.d/kibana.sh"
-
-if [ -f "$ENV_DIR/ELASTICSEARCH_URL" ]; then
-  ELASTICSEARCH_URL=$(cat $ENV_DIR/ELASTICSEARCH_URL)
-else
-  echo "You need to specify the environment variable ELASTICSEARCH_URL"
-  exit 1
-fi
-
-if [ -f "$ENV_DIR/DOWNLOAD_URL" ]; then
-  DOWNLOAD_URL=$(cat $ENV_DIR/DOWNLOAD_URL)
-else
-  KIBANA_VERSION=${KIBANA_VERSION:-7.10.2}
-  DOWNLOAD_URL="https://artifacts.elastic.co/downloads/kibana/kibana-oss-${KIBANA_VERSION}-linux-x86_64.tar.gz"
-fi
-
-KIBANA_PACKAGE=${DOWNLOAD_URL##*/}
-KIBANA_BASE_DIR=$(basename $KIBANA_PACKAGE .tar.gz)
-KIBANA_RUNTIME_DIR=`echo $KIBANA_BASE_DIR | sed 's/-oss//'`
-ES_SSL_VERIFICATION_MODE=${ES_SSL_VERIFICATION_MODE:-full}
-
-case ${KIBANA_PACKAGE} in
-  *.tar.gz)
-    KIBANA_DIR="$BUILD_DIR/${KIBANA_PACKAGE%%.tar.gz}"
-    KIBANA_DIR=`echo $KIBANA_DIR | sed 's/\-oss//'`
-    tar="tar xz"
-    ;;
-  *)
-    echo "Only tar.gz is supported: $KIBANA_PACKAGE" | indent
-    exit 1
-    ;;
-esac
-
-
-eval $( \
-	echo $ELASTICSEARCH_URL \
-	| sed -r 's/(https?:\/\/)((.*):(.*)@){0,1}(.*)/ELASTICSEARCH_URL=\1\5 \nELASTICSEARCH_USER=\3 \nELASTICSEARCH_PASSWORD=\4/'
-)
-
-mkdir="mkdir -p"
-download="curl -sLO"
-extract="$tar -C $BUILD_DIR --wildcards -f"
-verify="sha512sum --check --warn -"
-
-configure_url='sed -i -r s/\#(elasticsearch.hosts:\x20).{1,}/\1["'$(echo $ELASTICSEARCH_URL | sed 's/\//\\\//g')'"]/'
-configure_host='sed -i -r s/\#(server.host:\x20).{1,}/\1"0.0.0.0"/'
-configure_user='sed -i -r s/\#(elasticsearch.username:\x20).{1,}/\1"'$ELASTICSEARCH_USER'"/'
-configure_password='sed -i -r s/\#(elasticsearch.password:\x20).{1,}/\1"'$ELASTICSEARCH_PASSWORD'"/'
-configure_ssl_verify='sed -i -r s/\#(elasticsearch.ssl.verificationMode:\x20).{1,}/\1"'$ES_SSL_VERIFICATION_MODE'"/'
-configure_log_level='sed -i -r s/\#(logger.root.level:\x20).{1,}/\1"'$LOG_LEVEL'"/'
-
-
-echo "-----> Installing Kibana..."
-
-$mkdir ${INIT_SCRIPT%/*}
-$mkdir $CACHE_DIR
-
-if [ ! -f "$CACHE_DIR/$KIBANA_PACKAGE" ]; then
-  echo "downloading $DOWNLOAD_URL" | indent
-  $download $DOWNLOAD_URL
-
-  echo "verifying against ${DOWNLOAD_URL}.sha512" | indent
-  $download "${DOWNLOAD_URL}.sha512"
-
-  sha512sum $KIBANA_PACKAGE.sha512
-  if [ $? -eq 0 ]; then
-    mv $KIBANA_PACKAGE $CACHE_DIR
-  else
-    exit 1
-  fi
-fi
-
-$extract $CACHE_DIR/$KIBANA_PACKAGE
-
-echo "-----> Configuring host"
-$configure_host $KIBANA_DIR/config/kibana.yml
-echo "-----> Configuring ELASTICSEARCH_URL"
-$configure_url $KIBANA_DIR/config/kibana.yml
-
-if [[ -n "$ELASTICSEARCH_USER" && -n "$ELASTICSEARCH_PASSWORD" ]] ; then
-  echo "-----> Configuring Elasticsearch credentials"
-  $configure_user $KIBANA_DIR/config/kibana.yml
-  $configure_password $KIBANA_DIR/config/kibana.yml
-fi
-
-if [[ -n "$LOG_LEVEL" ]] ; then
-  echo "-----> Configuring Kibana log level to '$LOG_LEVEL'"
-  $configure_log_level $KIBANA_DIR/config/kibana.yml
-fi
-
-cd $KIBANA_DIR
-echo "-----> Remove the x-pack plugin"
-./bin/kibana-plugin remove "x-pack" | indent
-
-$configure_ssl_verify $KIBANA_DIR/config/kibana.yml
-
-if [ -f "$BUILD_DIR/kibana-plugins" ] ; then
-  echo "-----> 'kibana-plugins' file detected"
-    cat "${BUILD_DIR}/kibana-plugins" | while read plugin ; do
-      echo "       Installing Kibana plugin '${plugin}'"
-      ./bin/kibana-plugin install "${plugin}" | indent
-    done
-fi
-cd $BUILD_DIR
-
-if [ -f "$BUILD_DIR/plugins-config" ] ; then
-  echo "-----> 'plugins-config' file detected"
-  cat "${BUILD_DIR}/plugins-config" | while read config ; do
-    localfile=$(echo $config | cut -d ':' -f 1)
-    remotefile=$(echo $config | cut -d ':' -f 2)
-    echo "       Applying configuration '${localfile}'"
-    cp $localfile "${KIBANA_DIR}/plugins/${remotefile}"
-  done
-fi
-
-echo "-----> Installing reverse proxy for authentication"
-$mkdir "${BUILD_DIR}/vendor/nginx"
-
-NGINX_VENDOR_BASE_URL="${NGINX_VENDOR_URL:-https://nginx-buildpack.s3.amazonaws.com}"
-NGINX_VENDOR_URL="${NGINX_VENDOR_BASE_URL}/${STACK}"
-SEMVER_SERVER="https://semver.scalingo.com"
-DEFAULT_NGINX=$(curl --fail --location --silent "${SEMVER_SERVER}/nginx-${STACK}")
-NGINX_VERSION=${NGINX_VERSION:-$DEFAULT_NGINX}
-NGINX_URL="$NGINX_VENDOR_URL/package/nginx-$NGINX_VERSION.tgz"
-
-curl --fail --retry 3 --retry-delay 2 --connect-timeout 3 --max-time 30 -s "$NGINX_URL" | tar -C "$BUILD_DIR/vendor/nginx" -xzf -
-
-if [ -n "$KIBANA_USER" -a -n "$KIBANA_PASSWORD" ] ; then
-  printf "$KIBANA_USER:$(openssl passwd -1 -salt $(openssl rand -base64 6) $KIBANA_PASSWORD)" > $BUILD_DIR/.kibana-password
-fi
-
-mv "${KIBANA_DIR}/bin/kibana" "${KIBANA_DIR}/bin/kibana.orig"
-cp "$basedir/../conf/nginx.conf.erb" "$BUILD_DIR/vendor/nginx/conf/nginx.conf.erb"
-
-  cat > "$BUILD_DIR/.profile.d/nginx.sh" <<SH
-export PATH=/app/vendor/nginx/sbin:\$PATH
-SH
-
-  cat > "$KIBANA_DIR/bin/kibana" <<SH
-#!/usr/bin/env bash
-
-basedir="\$( cd -P "\$(dirname \$(dirname \$(dirname "\$0" )))" && pwd )"
-pmsgr=/tmp/pmsgr
-rm -f \$pmsgr
-mkfifo \$pmsgr
-
-
-eval \$(echo \$ELASTICSEARCH_URL | sed -r 's/(https?:\/\/)((.*):(.*)@){0,1}(.*)/ELASTICSEARCH_URL=\1\5 \nELASTICSEARCH_USER=\3 \nELASTICSEARCH_PASSWORD=\4/')
-
-if [[ -n "\$ELASTICSEARCH_USER" && -n "\$ELASTICSEARCH_PASSWORD" ]] ; then
-  export ELASTICSEARCH_AUTH=\$(echo -n \$ELASTICSEARCH_USER:\$ELASTICSEARCH_PASSWORD | base64)
-fi
-
-erb "\$basedir/vendor/nginx/conf/nginx.conf.erb" > "\$basedir/vendor/nginx/conf/nginx.conf"
-
-(
-    nginx -p "\$basedir/vendor/nginx" -c "\$basedir/vendor/nginx/conf/nginx.conf"
-    echo "nginx" > \$pmsgr
-) &
-
-if [ -n "\$ELASTICSEARCH_TLS_CA_URL" ] ; then
-  echo "-----> Downloading Elasticsearch CA Certificate"
-  curl -L -s "\$ELASTICSEARCH_TLS_CA_URL" -o /app/ca.crt
-  echo "elasticsearch.ssl.certificateAuthorities: [ \"/app/ca.crt\" ]" >> $KIBANA_RUNTIME_DIR/config/kibana.yml
-elif [ -n "\$ELASTICSEARCH_TLS_CA_PATH" ] ; then
-  echo "-----> Configuring Elasticsearch CA Certificate"
-  echo "elasticsearch.ssl.certificateAuthorities: [ \"/app/\$ELASTICSEARCH_TLS_CA_PATH}\" ]" >> $KIBANA_RUNTIME_DIR/config/kibana.yml
-fi
-
-(
-    "\$basedir/${KIBANA_RUNTIME_DIR}/bin/kibana.orig" --port 8000
-    echo "kibana" > \$pmsgr
-) &
-
-read exitproc <\$pmsgr
-echo "Boot failed: \$exitproc"
-exit 1
-SH
-
-chmod +x "${KIBANA_DIR}/bin/kibana"
-
-echo "Exporting PATH" | indent
-
-cat <<EOF > $INIT_SCRIPT
-export PATH="$PATH:${KIBANA_RUNTIME_DIR##*/}/bin"
-export NODE_OPTIONS="${NODE_OPTIONS:-"--max-old-space-size=512"}"
-EOF
